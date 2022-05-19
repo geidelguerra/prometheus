@@ -1,0 +1,150 @@
+---
+- name: Setup a Prometheus server
+  hosts: all
+  gather_facts: false
+  pre_tasks:
+    - name: Create Prometheus system group
+      ansible.builtin.group:
+        name: "{{ prometheus_group }}"
+        system: true
+        state: present
+      become: true
+
+    - name: Create Prometheus system user
+      ansible.builtin.user:
+        name: "{{ prometheus_user }}"
+        group: "{{ prometheus_group }}"
+        system: true
+        shell: "/usr/sbin/nologin"
+        create_home: false
+        state: present
+        home: "{{ prometheus_db_dir }}"
+      become: true
+
+    - name: Create Prometheus binaries directory
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: 0755
+      become: true
+      loop:
+        - "{{ prometheus_binary_dir }}"
+        - "{{ prometheus_binary_dir }}/exporters"
+
+    - name: Create Prometheus configuration directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: 0770
+        owner: root
+        group: "{{ prometheus_group }}"
+      become: true
+      loop:
+        - "{{ prometheus_config_dir }}"
+        - "{{ prometheus_config_dir }}/rules"
+        - "{{ prometheus_config_dir }}/file_sd"
+
+    - name: Create Prometheus data directory
+      ansible.builtin.file:
+        path: "{{ prometheus_db_dir }}"
+        state: directory
+        owner: "{{ prometheus_user }}"
+        group: "{{ prometheus_group }}"
+        mode: 0755
+      become: true
+
+    - name: Get Prometheus binaries
+      ansible.builtin.get_url:
+        url: https://github.com/prometheus/prometheus/releases/download/v{{ prometheus_version }}/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz
+        dest: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz"
+        checksum: "sha256:{{ prometheus_checksum }}"
+
+    - name: Extract Prometheus binaries
+      ansible.builtin.unarchive:
+        src: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz"
+        dest: /tmp
+        creates: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64"
+        remote_src: true
+
+    - name: Install Prometheus binaries
+      ansible.builtin.copy:
+        src: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64/{{ item }}"
+        dest: "{{ prometheus_binary_dir }}"
+        owner: root
+        group: root
+        remote_src: true
+      become: true
+      loop:
+        - prometheus
+        - promtool
+
+    - name: Copy Prometheus configuration
+      ansible.builtin.copy:
+        content: "{{ prometheus_config|to_nice_yaml(indent=2,sort_keys=False) }}"
+        dest: "{{ prometheus_config_dir }}/prometheus.yml"
+        mode: 0640
+        owner: root
+        group: "{{ prometheus_group }}"
+      become: true
+
+    - name: Install Prometheus service
+      ansible.builtin.template:
+        src: prometheus.service.j2
+        dest: /etc/systemd/system/prometheus.service
+      become: true
+      notify:
+        - Restart Prometheus
+
+    - name: Install packages
+      ansible.builtin.apt:
+        name:
+          - nginx
+          - nginx-extras
+          - libnginx-mod-http-auth-pam
+          - python3-passlib
+        update_cache: true
+      become: true
+
+    - name: Install certbot
+      community.general.snap:
+        name: certbot
+        classic: yes
+      become: true
+
+    - name: Install certificate
+      ansible.builtin.command: "/snap/bin/certbot certonly --nginx -n --agree-tos --email {{ email }} -d {{ prometheus_domain }}"
+      become: true
+
+    - name: Copy Nginx file
+      ansible.builtin.template:
+        src: templates/prometheus.conf.j2
+        dest: /etc/nginx/sites-enabled/prometheus.conf
+      become: true
+      notify: Reload Nginx
+
+    - name: Ensure Prometheus service is started and enabled
+      ansible.builtin.systemd:
+        daemon_reload: true
+        name: prometheus
+        state: started
+        enabled: true
+      become: true
+
+    - ansible.builtin.include_tasks: tasks/setup-exporters.yml
+
+  handlers:
+    - name: Restart Prometheus
+      ansible.builtin.systemd:
+        name: prometheus
+        daemon-reload: true
+        enabled: true
+        state: restarted
+      become: true
+
+    - name: Reload Nginx
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded
+      become: true

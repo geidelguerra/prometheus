@@ -1,0 +1,23 @@
+{{ ansible_managed | comment }}
+
+[Unit]
+Description=Prometheus
+After=network-online.target
+Requires=local-fs.target
+After=local-fs.target
+
+[Service]
+Type=simple
+User={{ prometheus_user }}
+Group={{ prometheus_group }}
+ExecReload=/bin/kill -HUP $MAINPID
+ExecStart={{ prometheus_binary_dir }}/prometheus \
+  --storage.tsdb.path={{ prometheus_db_dir }} \
+  --config.file={{ prometheus_config_dir }}/prometheus.yml \
+  --web.external-url=https://{{ prometheus_domain }}
+
+SyslogIdentifier=prometheus
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
